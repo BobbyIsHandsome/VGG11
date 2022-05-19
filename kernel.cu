@@ -1,4 +1,4 @@
-﻿#include "cuda_runtime.h"
+#include "cuda_runtime.h"
 #include "math_functions.h"
 #include "device_launch_parameters.h"
 #include "device_functions.h"
@@ -10,27 +10,32 @@
 #include <stdlib.h>
 #include <time.h>
 #include <sys/timeb.h>
+
 static const int blockSize = 1;
-static const int totalBlock = 64;
 static const int BLOCK_SIZE = 16;//the block size for matrix tilling
-static const int BLOCK_SIZE2 = 32;//the block size for matrix tilling
-//m*k is the layer size * channel size, k*n is the weight matrix
+static const int BLOCK_SIZE2 = 4;//the block size for matrix tilling
+static const int BLOCK_SIZE3 = 8;//the block size for matrix tilling
 __host__ void sysUsecTime(void)
 {
+    //  print timestamp, which is (min*60+sec)*1000+milsec
     struct timeb tv;
     struct tm* t;
-
     ftime(&tv);
-
     t = localtime(&tv.time);
-    printf(", start at:%d-%d-%d %d:%d:%d.%ld\n", 1900 + t->tm_year, 1 + t->tm_mon, t->tm_mday, t->tm_hour, t->tm_min, t->tm_sec, tv.millitm);
+    int timestamp = (t->tm_min * 60 + t->tm_sec) * 1000 + tv.millitm;
+    printf(" start at: %d:%d:%d.%ld, timestamp is %d\n", t->tm_hour, t->tm_min, t->tm_sec, tv.millitm, timestamp);
 }
+
 __device__ float max(float a, float b, float c, float d) {
     return max(max(max(a, b), c), d);
 }
 
 __global__ void Relu(float* c, unsigned int n)
 {
+    /*
+        c: input and output matrix
+        n: length of c
+    */
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     while (tid < n) {
         if (c[tid] < 0) {
@@ -42,55 +47,37 @@ __global__ void Relu(float* c, unsigned int n)
 __global__ void dense(float* fpMatrixA, float* fpMatrixB,
     float* fpMatrixC, float* bias, int m, int n, int k)
 {
+    /*
+        fpMatrixA: left matrix
+        fpMatrixB: right matrix
+        fpMatrixC: output matrix
+        bias: bias
+        m,n,k: A is m*k, B is k*n, C is m*n
+    */
     int nRow = blockIdx.y * blockDim.y + threadIdx.y;
     int nCol = blockIdx.x * blockDim.x + threadIdx.x;
-    //printf("the result is : %d  %d\n", nRow,nCol);
+    float* pta = &fpMatrixA[nRow * k];
+    float* ptb = &fpMatrixB[nCol];
     float fCVal = 0.0f;
     for (int i = 0; i < k; i++)
     {
-        //printf("the result is : %f\n", fpMatrixB[i]);
-        fCVal += fpMatrixA[nRow * k + i] * fpMatrixB[i * n + nCol];
+        fCVal += (*pta) * (*ptb);
+        ++pta;
+        ptb += n;
     }
-    //printf("the result is : %f\n", fCVal);
     fpMatrixC[nRow * n + nCol] = fCVal + bias[nRow];
 }
-__global__ void dense2(float* fpMatrixA, float* fpMatrixB,
-    float* fpMatrixC, float* bias, int m, int n, int k)
-{
-    float sum = 0.0f;
-    for (int i = 0; i < m; i++)
-    {
-        for (int j = 0; j < n; j++)
-        {
-            for (int l = 0; l < k; l++)
-            {   
-                sum += fpMatrixA[i * k + l] * fpMatrixB[l * n + j];
-            }
-            fpMatrixC[i * n + j] = sum + bias[i];
-            sum = 0.0f;
-        }
-    }
-}
-void matrixMulCpu(float* fpMatrixA, float* fpMatrixB, float* fpMatrixC, float* bias,
-    int m, int n, int k)
-{
-    float sum = 0.0f;
-    for (int i = 0; i < m; i++)
-    {
-        for (int j = 0; j < n; j++)
-        {
-            for (int l = 0; l < k; l++)
-            {
-                sum += fpMatrixA[i * k + l] * fpMatrixB[l * n + j];
-            }
-            fpMatrixC[i * n + j] = sum + bias[j];
-            sum = 0.0f;
-        }
-    }
-}
+
 //m*k input , k*n weight matrix , m*n output matrix , m is the batch size
 void gemm(float* fpMatrixA, float* fpMatrixB,
-    float* fpMatrixC, float* bias,int m,int n, int k) {
+    float* fpMatrixC, float* bias, int m, int n, int k) {
+    /*
+        fpMatrixA: left matrix
+        fpMatrixB: right matrix
+        fpMatrixC: output matrix
+        bias: bias
+        m,n,k: A is m*k, B is k*n, C is m*n
+    */
     int dimx;
     int dimy;
     if (n >= 1024) {
@@ -111,119 +98,70 @@ void gemm(float* fpMatrixA, float* fpMatrixB,
             dimy++;
         }
     }
-    //m = 1 n = 4096 k = 25088
-    //printf("the sum is :%d, %d,%d\n", m,dimx,dimy );
-    dim3 dimBlock(dimx,  dimy);
-    dim3 dimGrid(n/dimx, m/ dimy);
-    //dim3 dimBlock(1, 64);
-    //dim3 dimGrid(1, 64);
+    dim3 dimBlock(dimx, dimy);
+    dim3 dimGrid(n / dimx, m / dimy);
     if (m != 1000) {
-        printf("I'm here\n");
         dense << <dimBlock, dimGrid >> > (fpMatrixA, fpMatrixB, fpMatrixC, bias, m, n, k);
-        //dense2 << <1, 1 >> > (fpMatrixA, fpMatrixB, fpMatrixC, bias, m, n, k);
     }
     else {
         dim3 dimBlock(1, 100);
         dim3 dimGrid(1, 10);
-        dense << <dimGrid,dimBlock >> > (fpMatrixA, fpMatrixB, fpMatrixC, bias, m, n, k);
-        //dense2 << <1, 1 >> > (fpMatrixA, fpMatrixB, fpMatrixC, bias, m, n, k);
-
+        dense << <dimGrid, dimBlock >> > (fpMatrixA, fpMatrixB, fpMatrixC, bias, m, n, k);
     }
-    //dense2 << <1, 1 >> > (fpMatrixA, fpMatrixB, fpMatrixC, bias, m, n, k);
-
 }
+
 __global__ void batch_normalization(float* a, int rowsize, float* mean, float* variance, float* gamma, float* beta, float epsilon = 1e-5) {
+    /*
+        channel: channel number
+        a: input and ouotput matrix
+        rowsize: length of a,for each channel
+        mean: mean matrix
+        variance: var matrix
+        gamma: affine weight
+        beta: affine bias
+    */
     int idx = threadIdx.x;
     int bid = blockIdx.x;
-    float sum = 0;
-    //calculate mean
-
     for (int i = idx; i < rowsize; i += blockSize) {
         float a_hat = (a[rowsize * bid + i] - mean[bid]) / sqrt(variance[bid] + epsilon);
-        //printf(" the number is %f %f\n", *(a + rowsize * bid + i), beta[bid]);
         float result = gamma[bid] * a_hat + beta[bid];
         *(a + rowsize * bid + i) = result;
     }
 }
-__global__ void Conv3(float* fpMatrixC, float* fpMatrixA, float* fpMatrixB, float* bias, int m, int k, int n) {
-    int nRow = blockIdx.y * blockDim.y + threadIdx.y;
-    int nCol = blockIdx.x * blockDim.x + threadIdx.x;
-    float fCVal = 0.0f;
 
-    __shared__ float shTileA[BLOCK_SIZE2][BLOCK_SIZE2];
-    __shared__ float shTileB[BLOCK_SIZE2][BLOCK_SIZE2];
-
-    int nIter = (k + BLOCK_SIZE2 - 1) / BLOCK_SIZE2;
-    for (int i = 0; i < nIter; i++)
-    {
-        // load data from global memory to shared memory
-        shTileA[threadIdx.y][threadIdx.x] = fpMatrixA[nRow * k + i * BLOCK_SIZE2 + threadIdx.x];
-        shTileB[threadIdx.y][threadIdx.x] = fpMatrixB[(i * BLOCK_SIZE2 + threadIdx.y) * n + nCol];
-
-        // sync to wait for all threads in one block to finish loading datas
-        __syncthreads();
-
-        // sub-matrix multiply
-        for (int l = 0; l < BLOCK_SIZE2; l++)
-        {
-            fCVal += shTileA[threadIdx.y][l] * shTileB[l][threadIdx.x];
-        }
-
-        // sync to wait for all threads in one block to finish compute
-        __syncthreads();
-    }
-
-    // store results into global memory
-    fpMatrixC[nRow * n + nCol] = fCVal + bias[nRow];
-}
 __global__ void Conv(float* fpMatrixC, float* fpMatrixA, float* fpMatrixB, float* bias, int m, int k, int n) {
+    /*
+        fpMatrixA: left matrix
+        fpMatrixB: right matrix
+        fpMatrixC: output matrix
+        bias: bias
+        m,n,k: A is m*k, B is k*n, C is m*n
+    */
     int nRow = threadIdx.x;
     int nCol = blockIdx.x;
-    //int nRow = blockIdx.y * blockDim.y + threadIdx.y;
-    //int nCol = blockIdx.x * blockDim.x + threadIdx.x;
     float fCVal = 0.0f;
-    for (int i = 0; i < k; i++)
+    float* pta = &fpMatrixA[nRow * k];
+    float* ptb = &fpMatrixB[nCol * k];
+    for (int i = 0; i < k / 2; i++)
     {
-        fCVal += fpMatrixA[nRow * k + i] * fpMatrixB[i * n + nCol];
+        fCVal += (*pta) * (*ptb);
+        ++pta;
+        ++ptb;
+        fCVal += (*pta) * (*ptb);
+        ++pta;
+        ++ptb;
     }
-
+    if (k % 2 != 0) fCVal += (*pta) * (*ptb);
     fpMatrixC[nRow * n + nCol] = fCVal + bias[nRow];
 }
-__global__ void Conv4(float* fpMatrixC, float* fpMatrixA, float* fpMatrixB, float* bias, int m, int k, int n)
-{
-    int row = blockIdx.y * blockDim.y * 2 + threadIdx.y;
-    int col = blockIdx.x * blockDim.x + threadIdx.x;
-    float val[2] = { 0.0f };
-
-    __shared__ float shTileA[BLOCK_SIZE][BLOCK_SIZE];
-    __shared__ float shTileB[BLOCK_SIZE][BLOCK_SIZE];
-
-    int iter = (k + BLOCK_SIZE - 1) / BLOCK_SIZE;
-    for (int i = 0; i < iter; i++)
-    {
-        // read data from global memory to shared memory
-        shTileA[threadIdx.y][threadIdx.x] = fpMatrixA[row * k + i * BLOCK_SIZE + threadIdx.x];
-        shTileA[threadIdx.y + 16][threadIdx.x] = fpMatrixA[(row + 16) * k + i * BLOCK_SIZE + threadIdx.x];
-
-        shTileB[threadIdx.y][threadIdx.x] = fpMatrixB[(i * BLOCK_SIZE + threadIdx.y) * n + col];
-        shTileB[threadIdx.y + 16][threadIdx.x] = fpMatrixB[(i * BLOCK_SIZE + threadIdx.y + 16) * n + col];
-
-        __syncthreads();
-
-        for (int j = 0; j < BLOCK_SIZE; j++)
-        {
-            val[0] += shTileA[threadIdx.y][j] * shTileB[j][threadIdx.x];
-            val[1] += shTileA[threadIdx.y + 16][j] * shTileB[j][threadIdx.x];
-        }
-
-        __syncthreads();
-    }
-
-    fpMatrixC[row * n + col] = val[0]+bias[row];
-    fpMatrixC[(row + 16) * n + col] = val[1] + bias[row+16];
-}
-__global__ void Conv2(float* fpMatrixC, float* fpMatrixA, float* fpMatrixB, float* bias, int m, int k, int n)
-{
+__global__ void Conv2(float* fpMatrixC, float* fpMatrixA, float* fpMatrixB, float* bias, int m, int k, int n) {
+    /*
+        fpMatrixA: left matrix
+        fpMatrixB: right matrix
+        fpMatrixC: output matrix
+        bias: bias
+        m,n,k: A is m*k, B is k*n, C is m*n
+    */
     int nRow = blockIdx.y * blockDim.y + threadIdx.y;
     int nCol = blockIdx.x * blockDim.x + threadIdx.x;
     float fCVal = 0.0f;
@@ -232,31 +170,177 @@ __global__ void Conv2(float* fpMatrixC, float* fpMatrixA, float* fpMatrixB, floa
     __shared__ float shTileB[BLOCK_SIZE][BLOCK_SIZE];
 
     int nIter = (k + BLOCK_SIZE - 1) / BLOCK_SIZE;
+    float* ptrA = &fpMatrixA[nRow * k + 0 * BLOCK_SIZE + threadIdx.x];
+    float* ptrB = &fpMatrixB[0 * BLOCK_SIZE + threadIdx.y + nCol * k];
     for (int i = 0; i < nIter; i++)
     {
         // load data from global memory to shared memory
-        shTileA[threadIdx.y][threadIdx.x] = fpMatrixA[nRow * k + i * BLOCK_SIZE + threadIdx.x];
-        shTileB[threadIdx.y][threadIdx.x] = fpMatrixB[(i * BLOCK_SIZE + threadIdx.y) * n + nCol];
-
+        //shTileA[threadIdx.y][threadIdx.x] = fpMatrixA[nRow * k + i * BLOCK_SIZE + threadIdx.x];
+        //shTileB[threadIdx.x][threadIdx.y] = fpMatrixB[i * BLOCK_SIZE + threadIdx.y  + nCol*k];
+        shTileA[threadIdx.y][threadIdx.x] = *ptrA;
+        shTileB[threadIdx.x][threadIdx.y] = *ptrB;
         // sync to wait for all threads in one block to finish loading datas
         __syncthreads();
 
         // sub-matrix multiply
-        for (int l = 0; l < BLOCK_SIZE; l++)
+        for (int l = 0; l < BLOCK_SIZE; l += 2)
         {
-            fCVal += shTileA[threadIdx.y][l] * shTileB[l][threadIdx.x];
+            fCVal += shTileA[threadIdx.y][l] * shTileB[threadIdx.x][l];
+            fCVal += shTileA[threadIdx.y][l + 1] * shTileB[threadIdx.x][l + 1];
         }
 
         // sync to wait for all threads in one block to finish compute
         __syncthreads();
+        i++;
+        ptrA = ptrA + BLOCK_SIZE;
+        ptrB = ptrB + BLOCK_SIZE;
+        shTileA[threadIdx.y][threadIdx.x] = *ptrA;
+        shTileB[threadIdx.x][threadIdx.y] = *ptrB;
+        // sync to wait for all threads in one block to finish loading datas
+        __syncthreads();
+
+        // sub-matrix multiply
+        for (int l = 0; l < BLOCK_SIZE; l += 2)
+        {
+            fCVal += shTileA[threadIdx.y][l] * shTileB[threadIdx.x][l];
+            fCVal += shTileA[threadIdx.y][l + 1] * shTileB[threadIdx.x][l + 1];
+        }
+
+        // sync to wait for all threads in one block to finish compute
+        __syncthreads();
+        ptrA = ptrA + BLOCK_SIZE;
+        ptrB = ptrB + BLOCK_SIZE;
     }
 
     // store results into global memory
     fpMatrixC[nRow * n + nCol] = fCVal + bias[nRow];
 }
 
+__global__ void Conv3(float* fpMatrixC, float* fpMatrixA, float* fpMatrixB, float* bias, int m, int k, int n) {
+    /*
+        fpMatrixA: left matrix
+        fpMatrixB: right matrix
+        fpMatrixC: output matrix
+        bias: bias
+        m,n,k: A is m*k, B is k*n, C is m*n
+    */
+    int nRow = blockIdx.y * blockDim.y + threadIdx.y;
+    int nCol = blockIdx.x * blockDim.x + threadIdx.x;
+    float fCVal = 0.0f;
+
+    __shared__ float shTileA[BLOCK_SIZE2][BLOCK_SIZE2];
+    __shared__ float shTileB[BLOCK_SIZE2][BLOCK_SIZE2];
+
+    int nIter = (k + BLOCK_SIZE2 - 1) / BLOCK_SIZE2;
+    float* ptrA = &fpMatrixA[nRow * k + 0 * BLOCK_SIZE2 + threadIdx.x];
+    float* ptrB = &fpMatrixB[0 * BLOCK_SIZE2 + threadIdx.y + nCol * k];
+    for (int i = 0; i < nIter; i++)
+    {
+        // load data from global memory to shared memory
+        shTileA[threadIdx.y][threadIdx.x] = *ptrA;
+        shTileB[threadIdx.x][threadIdx.y] = *ptrB;
+        // sync to wait for all threads in one block to finish loading datas
+        __syncthreads();
+
+        // sub-matrix multiply
+        for (int l = 0; l < BLOCK_SIZE2; l += 2)
+        {
+            fCVal += shTileA[threadIdx.y][l] * shTileB[threadIdx.x][l];
+            fCVal += shTileA[threadIdx.y][l + 1] * shTileB[threadIdx.x][l + 1];
+        }
+
+        // sync to wait for all threads in one block to finish compute
+        __syncthreads();
+        i++;
+        ptrA = ptrA + BLOCK_SIZE2;
+        ptrB = ptrB + BLOCK_SIZE2;
+        shTileA[threadIdx.y][threadIdx.x] = *ptrA;
+        shTileB[threadIdx.x][threadIdx.y] = *ptrB;
+        // sync to wait for all threads in one block to finish loading datas
+        __syncthreads();
+
+        // sub-matrix multiply
+        for (int l = 0; l < BLOCK_SIZE2; l += 2)
+        {
+            fCVal += shTileA[threadIdx.y][l] * shTileB[threadIdx.x][l];
+            fCVal += shTileA[threadIdx.y][l + 1] * shTileB[threadIdx.x][l + 1];
+        }
+
+        // sync to wait for all threads in one block to finish compute
+        __syncthreads();
+        ptrA = ptrA + BLOCK_SIZE2;
+        ptrB = ptrB + BLOCK_SIZE2;
+    }
+    // store results into global memory
+    fpMatrixC[nRow * n + nCol] = fCVal + bias[nRow];
+}
+
+__global__ void Conv4(float* fpMatrixC, float* fpMatrixA, float* fpMatrixB, float* bias, int m, int k, int n) {
+    /*
+        fpMatrixA: left matrix
+        fpMatrixB: right matrix
+        fpMatrixC: output matrix
+        bias: bias
+        m,n,k: A is m*k, B is k*n, C is m*n
+    */
+    int nRow = blockIdx.y * blockDim.y + threadIdx.y;
+    int nCol = blockIdx.x * blockDim.x + threadIdx.x;
+    float fCVal = 0.0f;
+
+    __shared__ float shTileA[BLOCK_SIZE3][BLOCK_SIZE3];
+    __shared__ float shTileB[BLOCK_SIZE3][BLOCK_SIZE3];
+
+    int nIter = (k + BLOCK_SIZE3 - 1) / BLOCK_SIZE3;
+    float* ptrA = &fpMatrixA[nRow * k + 0 * BLOCK_SIZE3 + threadIdx.x];
+    float* ptrB = &fpMatrixB[0 * BLOCK_SIZE3 + threadIdx.y + nCol * k];
+    for (int i = 0; i < nIter; i++)
+    {
+        // load data from global memory to shared memory
+        shTileA[threadIdx.y][threadIdx.x] = *ptrA;
+        shTileB[threadIdx.x][threadIdx.y] = *ptrB;
+        // sync to wait for all threads in one block to finish loading datas
+        __syncthreads();
+
+        // sub-matrix multiply
+        for (int l = 0; l < BLOCK_SIZE3; l += 2)
+        {
+            fCVal += shTileA[threadIdx.y][l] * shTileB[threadIdx.x][l];
+            fCVal += shTileA[threadIdx.y][l + 1] * shTileB[threadIdx.x][l + 1];
+        }
+
+        // sync to wait for all threads in one block to finish compute
+        __syncthreads();
+        i++;
+        ptrA = ptrA + BLOCK_SIZE3;
+        ptrB = ptrB + BLOCK_SIZE3;
+        shTileA[threadIdx.y][threadIdx.x] = *ptrA;
+        shTileB[threadIdx.x][threadIdx.y] = *ptrB;
+        // sync to wait for all threads in one block to finish loading datas
+        __syncthreads();
+
+        // sub-matrix multiply
+        for (int l = 0; l < BLOCK_SIZE3; l += 2)
+        {
+            fCVal += shTileA[threadIdx.y][l] * shTileB[threadIdx.x][l];
+            fCVal += shTileA[threadIdx.y][l + 1] * shTileB[threadIdx.x][l + 1];
+        }
+
+        // sync to wait for all threads in one block to finish compute
+        __syncthreads();
+        ptrA = ptrA + BLOCK_SIZE3;
+        ptrB = ptrB + BLOCK_SIZE3;
+    }
+    // store results into global memory
+    fpMatrixC[nRow * n + nCol] = fCVal + bias[nRow];
+}
+
 __global__ void softmax(float* out, float* in, int n)
 {
+    /*
+        out: output matrix
+        in: input matrix
+        n: length of the matrix
+    */
     float sum = 0.0;
     for (int i = 0; i < n; ++i)
     {
@@ -269,8 +353,8 @@ __global__ void softmax(float* out, float* in, int n)
 
 __global__ void maxpooling2d(float* out, float* in, int n, int channel)
 {
-    // n is the height/width of the feature map.
-    for (int c = 0; c < channel; ++c)// for each channel
+    //  n is the height/width of the feature map.
+    for (int c = 0; c < channel; ++c)
     {
         int newn = n / 2;
         for (int i = 0; i < newn;++i) {
@@ -284,53 +368,31 @@ __global__ void maxpooling2d(float* out, float* in, int n, int channel)
 __global__ void changeform(float* in_map, int n, int in_channel, float* tmp_out)
 {
     /*
-    in_map : input feature map
-    n: height/width of the input feature map
-    in_channel: input feature map channel
-    tmp_out: the resized feature map, which is used in the convolution operation
+        in_map : input feature map
+        n: height/width of the input feature map
+        in_channel: input feature map channel
+        tmp_out: the resized feature map, which is used in the convolution operation
     */
+    //  use the input feature map to get the matrix form
     int step_table[9][2] = { {-1,-1},{-1,0},{-1,1},{0,-1},{0,0},{0,1},{1,-1},{1,0},{1,1} };
-    //use the input feature map to get the matrix form
     for (int i = 0; i < n; ++i) {
         for (int j = 0; j < n; ++j) {
             for (int k = 0; k < in_channel; ++k) {
                 for (int r = 0;r < 9; ++r) {
                     int newi = i + step_table[r][0];
                     int newj = j + step_table[r][1];
-                    tmp_out[(n * i + j) + (9 * k + r) * n * n] = (newi >= 0 && newj >= 0 && newi < n&& newj < n) ? in_map[n * n * k + newi * n + newj] : 0.0;
+                    tmp_out[9 * in_channel * (n * i + j) + 9 * k + r] = (newi >= 0 && newj >= 0 && newi < n&& newj < n) ? in_map[n * n * k + newi * n + newj] : 0.0;
                 }
             }
         }
     }
 }
 
-__global__ void Conv2d(float* out_map, float* kernels, int n, int in_channel, int out_channel, float* bias, float* tmp_out)
-{
-    /*
-    kernels: weight of the conv kernel
-    n: height/width of the input feature map
-    in_channel: input feature map channel
-    out_channel: output feature map channel
-    bias: bias of the conv kernel
-    tmp_out: the resized feature map, which is used in the convolution operation
-    */
-    for (int i = 0;i < out_channel;++i) {
-        for (int j = 0;j < n * n;++j) {
-            float sum = 0.0;
-            for (int k = 0;k < 9 * in_channel;++k) {
-                sum += kernels[i * 9 * in_channel + k] * tmp_out[j + k * n * n];
-            }
-            out_map[i * n * n + j] = sum + bias[i];
-        }
-    }
-}
-
 __host__ void loadweights(float* weight, char* weightpath, const char* path) {
-    // load weights from given file
+    //  load weights from given file
     char newpath[100] = { '\0' };
     strcat(newpath, weightpath);
     strcat(newpath, path);
-    printf("%s\n", newpath);
     FILE* fp = fopen(newpath, "rb");
     fseek(fp, 0, SEEK_END);
     int fileSize = ftell(fp);
@@ -341,7 +403,7 @@ __host__ void loadweights(float* weight, char* weightpath, const char* path) {
 }
 
 __host__ void loadimage(float* weight, const char* path) {
-    // load weights from given file
+    //  load weights from given file
     FILE* fp = fopen(path, "rb");
     fseek(fp, 0, SEEK_END);
     int fileSize = ftell(fp);
@@ -356,11 +418,12 @@ int main(int argc, char* argv[])
 {
     float* feature;
     float* d_feature;
-    printf("---------------------------------------------Start-----------------------------------------\n");
+    printf("--------------------Start----------------\n");
     char weightpath[100] = { '\0' };
     strcat(weightpath, argv[1]);
     char* imagefile = argv[2];
     const char* outputfile = argv[3];
+
     feature = (float*)malloc(sizeof(float) * (150528));
     loadimage(feature, imagefile);
 
@@ -389,13 +452,11 @@ int main(int argc, char* argv[])
     cudaMemcpy(d_conv1_w, conv1_w, sizeof(float) * 1728, cudaMemcpyHostToDevice);
     cudaMemcpy(d_conv1_b, conv1_b, sizeof(float) * 64, cudaMemcpyHostToDevice);
     changeform << <1, 1 >> > (d_feature, 224, 3, d_tmp1);
+
     printf("gemm");
     sysUsecTime();
-    dim3 dimGrid(224, 8);
-    dim3 dimBlock(224, 8);
-    Conv << <224 * 224, 64 >> > (d_conv1_out, d_conv1_w, d_tmp1, d_conv1_b, 64, 9 * 3, 224 * 224);
-    //Conv << <dimGrid,dimBlock>> > (d_conv1_out, d_conv1_w, d_tmp1, d_conv1_b, 64, 9 * 3, 224 * 224);
 
+    Conv << <224 * 224, 64 >> > (d_conv1_out, d_conv1_w, d_tmp1, d_conv1_b, 64, 9 * 3, 224 * 224);
     cudaFree(d_conv1_w);
     cudaFree(d_conv1_b);
     cudaFree(d_feature);
@@ -447,11 +508,11 @@ int main(int argc, char* argv[])
     float* d_pool1_out;
     pool1_out = (float*)malloc(sizeof(float) * (64 * 112 * 112));
     cudaMalloc((void**)&d_pool1_out, sizeof(float) * (64 * 112 * 112));
-    maxpooling2d << <10, 100 >> > (d_pool1_out, d_conv1_out, 224, 64);
+    maxpooling2d << <1, 1 >> > (d_pool1_out, d_conv1_out, 224, 64);
     cudaFree(d_conv1_out);
     free(conv1_out);
     cudaDeviceSynchronize();
-    printf("--------------------------------------Block 1 End------------------------------------------\n");
+    printf("-------------Block 1 End--------------\n");
     // ----------------------------------------Block 2-----------------------------------------------
     // ----------------------------------------------------------------------------------------------
     // conv2-----------------------------------------------------------------------------------------
@@ -478,14 +539,15 @@ int main(int argc, char* argv[])
     cudaMemcpy(d_conv2_w, conv2_w, sizeof(float) * (9 * in_conv * kernel_num_conv), cudaMemcpyHostToDevice);
     cudaMemcpy(d_conv2_b, conv2_b, sizeof(float) * (kernel_num_conv), cudaMemcpyHostToDevice);
     changeform << <1, 1 >> > (d_pool1_out, h_conv, in_conv, d_tmp2);
+
     printf("gemm");
     sysUsecTime();
-    printf("the size is %d,%d,%d\n", kernel_num_conv, 9 * in_conv, h_conv* h_conv);
     //128,576,12544
     dim3 dimGrid2(784, 8);
     dim3 dimBlock2(16, 16);
+    Conv2 << <dimGrid2, dimBlock2 >> > (d_conv2_out, d_conv2_w, d_tmp2, d_conv2_b, kernel_num_conv, 9 * in_conv, h_conv * h_conv);
+
     //Conv << <h_conv * h_conv, kernel_num_conv >> > (d_conv2_out, d_conv2_w, d_tmp2, d_conv2_b, kernel_num_conv, 9 * in_conv, h_conv * h_conv);
-    Conv2 << <dimGrid2, dimBlock2 >> > (d_conv2_out, d_conv2_w, d_tmp2, d_conv2_b, kernel_num_conv, 9 * in_conv, h_conv* h_conv);
     cudaFree(d_conv2_w);
     cudaFree(d_conv2_b);
     cudaFree(d_pool1_out);
@@ -529,7 +591,7 @@ int main(int argc, char* argv[])
     free(bn2_mean);
     free(bn2_var);
     //Relu------------------------------------------------------------------------------------------
-    Relu << <10, 100 >> > (d_conv2_out, h_conv * h_conv * kernel_num_conv);
+    Relu << <100, 100 >> > (d_conv2_out, h_conv * h_conv * kernel_num_conv);
     //maxpool2--------------------------------------------------------------------------------------
     printf("Block2, pool2");
     sysUsecTime();
@@ -541,7 +603,7 @@ int main(int argc, char* argv[])
     cudaFree(d_conv2_out);
     free(conv2_out);
     cudaDeviceSynchronize();
-    printf("--------------------------------------Block 2 End------------------------------------------\n");
+    printf("-------------Block 2 End--------------\n");
     // ----------------------------------------Block 3-----------------------------------------------
     // ----------------------------------------------------------------------------------------------
     // conv3-----------------------------------------------------------------------------------------
@@ -568,14 +630,17 @@ int main(int argc, char* argv[])
     cudaMemcpy(d_conv3_w, conv3_w, sizeof(float) * (9 * in_conv * kernel_num_conv), cudaMemcpyHostToDevice);
     cudaMemcpy(d_conv3_b, conv3_b, sizeof(float) * (kernel_num_conv), cudaMemcpyHostToDevice);
     changeform << <1, 1 >> > (d_pool2_out, h_conv, in_conv, d_tmp3);
+
     printf("gemm");
     sysUsecTime();
-    printf("the size2 is %d,%d,%d\n", kernel_num_conv, 9 * in_conv, h_conv* h_conv);
     //256 112 3136
-    dim3 dimGrid3(196, 16);
-    dim3 dimBlock3(16, 16);
+    //dim3 dimGrid3(196, 16);
+   // dim3 dimBlock3(16, 16);
+    dim3 dimGrid32(392, 32);
+    dim3 dimBlock32(8, 8);
+    Conv4 << < dimGrid32, dimBlock32 >> > (d_conv3_out, d_conv3_w, d_tmp3, d_conv3_b, kernel_num_conv, 9 * in_conv, h_conv * h_conv);
+
     //Conv << <h_conv * h_conv, kernel_num_conv >> > (d_conv3_out, d_conv3_w, d_tmp3, d_conv3_b, kernel_num_conv, 9 * in_conv, h_conv * h_conv);
-    Conv2 << < dimGrid2 ,dimBlock2>> > (d_conv3_out, d_conv3_w, d_tmp3, d_conv3_b, kernel_num_conv, 9 * in_conv, h_conv* h_conv);
     cudaFree(d_conv3_w);
     cudaFree(d_conv3_b);
     cudaFree(d_pool2_out);
@@ -620,9 +685,9 @@ int main(int argc, char* argv[])
     free(bn3_mean);
     free(bn3_var);
     //Relu------------------------------------------------------------------------------------------
-    Relu << <10, 100 >> > (d_conv3_out, h_conv * h_conv * kernel_num_conv);
+    Relu << <100, 100 >> > (d_conv3_out, h_conv * h_conv * kernel_num_conv);
     cudaDeviceSynchronize();
-    printf("\n----------------------------------------------------------\n");
+    printf("---------------------------------\n");
     // conv4-----------------------------------------------------------------------------------------
     printf("Block3, Conv4");
     sysUsecTime();
@@ -649,14 +714,16 @@ int main(int argc, char* argv[])
     cudaMemcpy(d_conv4_w, conv4_w, sizeof(float) * (9 * in_conv * kernel_num_conv), cudaMemcpyHostToDevice);
     cudaMemcpy(d_conv4_b, conv4_b, sizeof(float) * (kernel_num_conv), cudaMemcpyHostToDevice);
     changeform << <1, 1 >> > (d_conv3_out, h_conv, in_conv, d_tmp4);
+
     printf("gemm");
     sysUsecTime();
-    printf("the size3 is %d,%d,%d\n", kernel_num_conv, 9 * in_conv, h_conv* h_conv);
     //256 2304 3136
-    dim3 dimGrid4(196, 16);
-    dim3 dimBlock4(16, 16);
+    //dim3 dimGrid4(196, 16);
+    //dim3 dimBlock4(16, 16);
+    dim3 dimGrid42(392, 32);
+    dim3 dimBlock42(8, 8);
+    Conv4 << <dimGrid42, dimBlock42 >> > (d_conv4_out, d_conv4_w, d_tmp4, d_conv4_b, kernel_num_conv, 9 * in_conv, h_conv * h_conv);
     //Conv << <h_conv * h_conv, kernel_num_conv >> > (d_conv4_out, d_conv4_w, d_tmp4, d_conv4_b, kernel_num_conv, 9 * in_conv, h_conv * h_conv);
-    Conv2 << <dimGrid4, dimBlock4 >> > (d_conv4_out, d_conv4_w, d_tmp4, d_conv4_b, kernel_num_conv, 9 * in_conv, h_conv* h_conv);
     cudaFree(d_conv4_w);
     cudaFree(d_conv4_b);
     cudaFree(d_conv3_out);
@@ -700,7 +767,7 @@ int main(int argc, char* argv[])
     free(bn4_mean);
     free(bn4_var);
     //Relu------------------------------------------------------------------------------------------
-    Relu << <10, 100 >> > (d_conv4_out, h_conv * h_conv * kernel_num_conv);
+    Relu << <100, 100 >> > (d_conv4_out, h_conv * h_conv * kernel_num_conv);
     cudaDeviceSynchronize();
     //maxpool3--------------------------------------------------------------------------------------
     printf("Block3, pool3");
@@ -713,7 +780,7 @@ int main(int argc, char* argv[])
     cudaFree(d_conv4_out);
     free(conv4_out);
     cudaDeviceSynchronize();
-    printf("--------------------------------------Block 3 End------------------------------------------\n");
+    printf("-------------Block 3 End--------------\n");
     // ----------------------------------------Block 4-----------------------------------------------
     // ----------------------------------------------------------------------------------------------
     // conv5-----------------------------------------------------------------------------------------
@@ -740,14 +807,16 @@ int main(int argc, char* argv[])
     cudaMemcpy(d_conv5_w, conv5_w, sizeof(float) * (9 * in_conv * kernel_num_conv), cudaMemcpyHostToDevice);
     cudaMemcpy(d_conv5_b, conv5_b, sizeof(float) * (kernel_num_conv), cudaMemcpyHostToDevice);
     changeform << <1, 1 >> > (d_pool3_out, h_conv, in_conv, d_tmp5);
+
     printf("gemm");
     sysUsecTime();
-    printf("the size4 is %d,%d,%d\n", kernel_num_conv, 9 * in_conv, h_conv* h_conv);
     //512 2304 784
-    dim3 dimGrid5(49, 32);
-    dim3 dimBlock5(16, 16);
-    Conv << <h_conv * h_conv, kernel_num_conv >> > (d_conv5_out, d_conv5_w, d_tmp5, d_conv5_b, kernel_num_conv, 9 * in_conv, h_conv * h_conv);
-    Conv2 << <dimGrid5, dimBlock5 >> > (d_conv5_out, d_conv5_w, d_tmp5, d_conv5_b, kernel_num_conv, 9 * in_conv, h_conv* h_conv);
+    //dim3 dimGrid5(49, 32);
+    //dim3 dimBlock5(16, 16);
+    dim3 dimGrid52(98, 64);
+    dim3 dimBlock52(8, 8);
+    Conv4 << <dimGrid52, dimBlock52 >> > (d_conv5_out, d_conv5_w, d_tmp5, d_conv5_b, kernel_num_conv, 9 * in_conv, h_conv * h_conv);
+    //Conv << <h_conv * h_conv, kernel_num_conv >> > (d_conv5_out, d_conv5_w, d_tmp5, d_conv5_b, kernel_num_conv, 9 * in_conv, h_conv * h_conv);
     cudaFree(d_conv5_w);
     cudaFree(d_conv5_b);
     cudaFree(d_pool3_out);
@@ -792,9 +861,9 @@ int main(int argc, char* argv[])
     free(bn5_mean);
     free(bn5_var);
     //Relu------------------------------------------------------------------------------------------
-    Relu << <10, 100 >> > (d_conv5_out, h_conv * h_conv * kernel_num_conv);
+    Relu << <100, 100 >> > (d_conv5_out, h_conv * h_conv * kernel_num_conv);
     cudaDeviceSynchronize();
-    printf("\n----------------------------------------------------------\n");
+    printf("---------------------------------\n");
     // conv6-----------------------------------------------------------------------------------------
     printf("Block4, Conv6");
     sysUsecTime();
@@ -821,15 +890,17 @@ int main(int argc, char* argv[])
     cudaMemcpy(d_conv6_w, conv6_w, sizeof(float) * (9 * in_conv * kernel_num_conv), cudaMemcpyHostToDevice);
     cudaMemcpy(d_conv6_b, conv6_b, sizeof(float) * (kernel_num_conv), cudaMemcpyHostToDevice);
     changeform << <1, 1 >> > (d_conv5_out, h_conv, in_conv, d_tmp6);
+
     printf("gemm");
     sysUsecTime();
-    printf("the size5 is %d,%d,%d\n", kernel_num_conv, 9 * in_conv, h_conv* h_conv);
     //512 46008 784
-    dim3 dimGrid6(49, 32);
-    dim3 dimBlock6(16, 16);
-    Conv2 << <dimGrid6, dimBlock6 >> > (d_conv6_out, d_conv6_w, d_tmp6, d_conv6_b, kernel_num_conv, 9 * in_conv, h_conv* h_conv);
+    //dim3 dimGrid6(49, 32);
+    //dim3 dimBlock6(16, 16);
+    dim3 dimGrid62(98, 64);
+    dim3 dimBlock62(8, 8);
+    Conv4 << <dimGrid62, dimBlock62 >> > (d_conv6_out, d_conv6_w, d_tmp6, d_conv6_b, kernel_num_conv, 9 * in_conv, h_conv * h_conv);
 
-   // Conv << <h_conv * h_conv, kernel_num_conv >> > (d_conv6_out, d_conv6_w, d_tmp6, d_conv6_b, kernel_num_conv, 9 * in_conv, h_conv * h_conv);
+    // Conv << <h_conv * h_conv, kernel_num_conv >> > (d_conv6_out, d_conv6_w, d_tmp6, d_conv6_b, kernel_num_conv, 9 * in_conv, h_conv * h_conv);
     cudaFree(d_conv6_w);
     cudaFree(d_conv6_b);
     cudaFree(d_conv5_out);
@@ -873,7 +944,7 @@ int main(int argc, char* argv[])
     free(bn6_mean);
     free(bn6_var);
     //Relu------------------------------------------------------------------------------------------
-    Relu << <10, 100 >> > (d_conv6_out, h_conv * h_conv * kernel_num_conv);
+    Relu << <100, 100 >> > (d_conv6_out, h_conv * h_conv * kernel_num_conv);
     cudaDeviceSynchronize();
     //maxpool4--------------------------------------------------------------------------------------
     printf("Block4, pool4");
@@ -886,7 +957,7 @@ int main(int argc, char* argv[])
     cudaFree(d_conv6_out);
     free(conv6_out);
     cudaDeviceSynchronize();
-    printf("--------------------------------------Block 4 End------------------------------------------\n");
+    printf("-------------Block 4 End--------------\n");
 
     // ----------------------------------------Block 5-----------------------------------------------
     // ----------------------------------------------------------------------------------------------
@@ -914,13 +985,15 @@ int main(int argc, char* argv[])
     cudaMemcpy(d_conv7_w, conv7_w, sizeof(float) * (9 * in_conv * kernel_num_conv), cudaMemcpyHostToDevice);
     cudaMemcpy(d_conv7_b, conv7_b, sizeof(float) * (kernel_num_conv), cudaMemcpyHostToDevice);
     changeform << <1, 1 >> > (d_pool4_out, h_conv, in_conv, d_tmp7);
+
     printf("gemm");
     sysUsecTime();
-    printf("the size6 is %d,%d,%d\n", kernel_num_conv, 9 * in_conv, h_conv* h_conv);
     //512 4608 196
     dim3 dimGrid7(49, 128);
     dim3 dimBlock7(4, 4);
     Conv3 << <dimGrid7, dimBlock7 >> > (d_conv7_out, d_conv7_w, d_tmp7, d_conv7_b, kernel_num_conv, 9 * in_conv, h_conv * h_conv);
+
+    //Conv << <h_conv * h_conv, kernel_num_conv >> > (d_conv7_out, d_conv7_w, d_tmp7, d_conv7_b, kernel_num_conv, 9 * in_conv, h_conv * h_conv);
     cudaFree(d_conv7_w);
     cudaFree(d_conv7_b);
     cudaFree(d_pool4_out);
@@ -965,9 +1038,9 @@ int main(int argc, char* argv[])
     free(bn7_mean);
     free(bn7_var);
     //Relu------------------------------------------------------------------------------------------
-    Relu << <10, 100 >> > (d_conv7_out, h_conv * h_conv * kernel_num_conv);
+    Relu << <100, 100 >> > (d_conv7_out, h_conv * h_conv * kernel_num_conv);
     cudaDeviceSynchronize();
-    printf("\n----------------------------------------------------------\n");
+    printf("---------------------------------\n");
     // conv8-----------------------------------------------------------------------------------------
     printf("Block5, Conv8");
     sysUsecTime();
@@ -994,16 +1067,14 @@ int main(int argc, char* argv[])
     cudaMemcpy(d_conv8_w, conv8_w, sizeof(float) * (9 * in_conv * kernel_num_conv), cudaMemcpyHostToDevice);
     cudaMemcpy(d_conv8_b, conv8_b, sizeof(float) * (kernel_num_conv), cudaMemcpyHostToDevice);
     changeform << <1, 1 >> > (d_conv7_out, h_conv, in_conv, d_tmp8);
+
     printf("gemm");
     sysUsecTime();
-    printf("the size7 is %d,%d,%d\n", kernel_num_conv, 9 * in_conv, h_conv* h_conv);
     //512 4608 196
     dim3 dimGrid8(49, 128);
     dim3 dimBlock8(4, 4);
-    Conv << <h_conv * h_conv, kernel_num_conv >> > (d_conv8_out, d_conv8_w, d_tmp8, d_conv8_b, kernel_num_conv, 9 * in_conv, h_conv * h_conv);
-    //Conv3 << <dimGrid8, dimBlock8 >> > (d_conv8_out, d_conv8_w, d_tmp8, d_conv8_b, kernel_num_conv, 9 * in_conv, h_conv * h_conv);
-
-    cudaFree(d_conv8_w);
+    Conv3 << <dimGrid8, dimBlock8 >> > (d_conv8_out, d_conv8_w, d_tmp8, d_conv8_b, kernel_num_conv, 9 * in_conv, h_conv * h_conv);
+    //Conv << <h_conv * h_conv, kernel_num_conv >> > (d_conv8_out, d_conv8_w, d_tmp8, d_conv8_b, kernel_num_conv, 9 * in_conv, h_conv * h_conv);
     cudaFree(d_conv8_b);
     cudaFree(d_conv7_out);
     cudaFree(d_tmp8);
@@ -1046,22 +1117,20 @@ int main(int argc, char* argv[])
     free(bn8_mean);
     free(bn8_var);
     //Relu------------------------------------------------------------------------------------------
-    Relu << <10, 100 >> > (d_conv8_out, h_conv * h_conv * kernel_num_conv);
+    Relu << <100, 100 >> > (d_conv8_out, h_conv * h_conv * kernel_num_conv);
     cudaDeviceSynchronize();
     //maxpool5--------------------------------------------------------------------------------------
     printf("Block5, pool5");
     sysUsecTime();
-    float* pool5_out;
+    float* pool5_out = (float*)malloc(sizeof(float) * (h_conv * h_conv * kernel_num_conv / 4));;
     float* d_pool5_out;
-    pool5_out = (float*)malloc(sizeof(float) * (h_conv * h_conv * kernel_num_conv / 4));
     cudaMalloc((void**)&d_pool5_out, sizeof(float) * (h_conv * h_conv * kernel_num_conv / 4));
     maxpooling2d << <1, 1 >> > (d_pool5_out, d_conv8_out, h_conv, kernel_num_conv);
     cudaMemcpy(pool5_out, d_pool5_out, sizeof(float) * (h_conv * h_conv * kernel_num_conv / 4), cudaMemcpyDeviceToHost);
     cudaFree(d_conv8_out);
     free(conv8_out);
     cudaDeviceSynchronize();
-    printf("--------------------------------------Block 5 End------------------------------------------\n");
-    printf("--------------------------------------Block 5 End------------------------------------------\n");
+    printf("-------------Block 5 End--------------\n");
     //---------------------------------------------FC layer------------------------------------------
     // fc1-------------------------------------------------------------------------------------------
     printf("fc1");
@@ -1080,15 +1149,14 @@ int main(int argc, char* argv[])
     cudaMalloc((void**)&d_fc1_out, sizeof(float) * (4096));
     cudaMemcpy(d_fc1_w, fc1_w, sizeof(float) * (4096 * 512 * 7 * 7), cudaMemcpyHostToDevice);
     cudaMemcpy(d_fc1_b, fc1_b, sizeof(float) * (4096), cudaMemcpyHostToDevice);
-    // cudaMalloc((void**)&d_tmp1, sizeof(float) * (3 * 9 * 224 * 224));
     gemm(d_fc1_w, d_pool5_out, d_fc1_out, d_fc1_b, 4096, 1, 25088);
     cudaFree(d_fc1_w);
     cudaFree(d_fc1_b);
     free(fc1_b);
     free(fc1_w);
     // relu1-------------------------------------------------------------------------------------------
-    Relu << <10, 100 >> > (d_fc1_out, 4096);
-    printf("--------------------------------------FC layer 1 End------------------------------------------\n");
+    Relu << <100, 100 >> > (d_fc1_out, 4096);
+    printf("-------------FC layer 1 End--------------\n");
 
     // fc2-------------------------------------------------------------------------------------------
     printf("fc2");
@@ -1110,14 +1178,14 @@ int main(int argc, char* argv[])
     cudaMemcpy(d_fc2_b, fc2_b, sizeof(float) * (4096), cudaMemcpyHostToDevice);
     gemm(d_fc2_w, d_fc1_out, d_fc2_out, d_fc2_b, 4096, 1, 4096);
     // relu1-------------------------------------------------------------------------------------------
-    Relu << <10, 100 >> > (d_fc2_out, 4096);
+    Relu << <100, 100 >> > (d_fc2_out, 4096);
     cudaMemcpy(fc2_out, d_fc2_out, sizeof(float) * (4096), cudaMemcpyDeviceToHost);
     cudaFree(d_fc2_w);
     cudaFree(d_fc2_b);
     cudaFree(d_fc1_out);
     free(fc2_b);
     free(fc2_w);
-    printf("--------------------------------------FC layer 2 End------------------------------------------\n");
+    printf("-------------FC layer 2 End--------------\n");
 
     // fc3-------------------------------------------------------------------------------------------
     printf("fc3");
@@ -1141,9 +1209,8 @@ int main(int argc, char* argv[])
 
     softmax_out = (float*)malloc(sizeof(float) * (1000));
     cudaMalloc((void**)&d_softmax_out, sizeof(float) * 1000);
-    //printf("the feature 3 num is : %f\n", sum2);
-    printf("--------------------------------------FC layer 3 End------------------------------------------\n");
-
+    printf("-------------FC layer 3 End--------------\n");
+    sysUsecTime();
     //softmax-----------------------------------------------------------------------------------------
     softmax << <1, 1 >> > (d_softmax_out, d_fc3_out, 1000);
     free(fc3_b);
@@ -1151,21 +1218,23 @@ int main(int argc, char* argv[])
     cudaFree(d_fc3_w);
     cudaFree(d_fc3_b);
     cudaFree(d_fc2_out);
-    printf("--------------------------------------Softmax End------------------------------------------\n");
-
+    printf("-------------Softmax End--------------\n");
+    sysUsecTime();
     float* tmp;
     tmp = (float*)malloc(sizeof(float) * (1000));
     loadimage(tmp, "./output/final_output.txt");
     cudaMemcpy(softmax_out, d_softmax_out, sizeof(float) * (1000), cudaMemcpyDeviceToHost);
     FILE* fp = NULL;
     fp = fopen(outputfile, "w+");
+    printf("---------different output-------------\n");
     for (int i = 0;i < 1000;++i) {
-        fprintf(fp, "%f, ", softmax_out[i]);
+        fprintf(fp, "%f*1e-4, ", softmax_out[i] * 10000);
+        if ((i + 1) % 5 == 0) fprintf(fp, "\n");
         if (abs(tmp[i] - softmax_out[i]) > 1e-7) { printf("place:%d , true is: %f, now is: %f \n", i, tmp[i], softmax_out[i]); }
     }
     fprintf(fp, "\n");
     fclose(fp);
-    printf("--------------------------------------Program End------------------------------------------\n");
+    printf("-------------Program End--------------\n");
     cudaFree(d_fc3_out);
     cudaFree(d_softmax_out);
     free(fc2_out);
